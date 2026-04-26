@@ -1,7 +1,7 @@
 /*!
  * @name 非常刀
  * @description 聚合音源，进群链接 https://t.me/gydjlfk
- * @version v4
+ * @version v5
  * @author 群主要进去
  */
 
@@ -15,6 +15,8 @@ const SUYIN_QQ_KEY = 'oiapi-ef6133b7-ac2f-dc7d-878c-d3e207a82575'
 const SUYIN_163_API = 'https://oiapi.net/api/Music_163'
 const SUYIN_KW_API = 'https://oiapi.net/api/Kuwo'
 const SUYIN_MG_API = 'https://api.xcvts.cn/api/music/migu'
+const QISHUI_SEARCH_API = 'https://api-vehicle.volcengine.com/v2/search/type'
+const QISHUI_H5_API = 'https://api.qishui.com/luna/h5/track'
 
 // ========== 音质映射 ==========
 const CHKSZ_LEVEL = { '128k': 'standard', '320k': 'exhigh', 'flac': 'lossless', 'flac24bit': 'jymaster' }
@@ -225,6 +227,18 @@ async function templateGetUrl(platform, info, quality, templates) {
   return validateUrl(body?.url || body?.data?.url || extractUrlFromMsg(typeof body === 'string' ? body : JSON.stringify(body)))
 }
 
+// ========== Provider: 汽水H5 (免费直链) ==========
+async function qishuiH5GetUrl(info) {
+  const id = getSongId(info)
+  if (!id) throw new Error('缺少ID')
+  const body = await httpGet(`${QISHUI_H5_API}?track_id=${id}`)
+  const songStr = body?.track_player?.video_model
+  if (!songStr) throw new Error('汽水H5无数据')
+  const song = JSON.parse(songStr).video_list?.[0]
+  if (!song?.main_url) throw new Error('汽水H5无链接')
+  return validateUrl(song.main_url)
+}
+
 // ========== 回退链 ==========
 const CHAINS = {
   wy: [
@@ -256,6 +270,9 @@ const CHAINS = {
     { name: '溯音咪咕', fn: (si, q) => suyinMgGetUrl(si) },
     { name: '长青', fn: (si, q) => templateGetUrl('mg', si, q, CHANGQING) },
     { name: '念心', fn: (si, q) => templateGetUrl('mg', si, q, NIANXIN) },
+  ],
+  qs: [
+    { name: '汽水H5', fn: (si, q) => qishuiH5GetUrl(si) },
   ],
 }
 
@@ -293,6 +310,7 @@ on(EVENT_NAMES.request, async ({ action, source, info }) => {
     switch (action) {
       case 'musicUrl': return await handleMusicUrl(source, info)
       case 'search': return await handleSearch(source, info)
+      case 'lyric': return await handleLyric(source, info)
       default: throw new Error('不支持的操作')
     }
   } catch (error) {
@@ -316,6 +334,7 @@ async function handleSearch(source, info) {
     case 'wy': return await searchChksz(keyword, limit)
     case 'kw': return await searchKuwo(keyword, limit)
     case 'mg': return await searchMigu(keyword, limit)
+    case 'qs': return await searchQishui(keyword, limit)
     default: throw new Error('该平台不支持搜索')
   }
 }
@@ -369,6 +388,45 @@ async function searchMigu(keyword, limit) {
   return results
 }
 
+// ========== 歌词 ==========
+async function handleLyric(source, info) {
+  if (source !== 'qs') throw new Error('该平台不支持歌词')
+  const id = getSongId(info?.musicInfo || {})
+  if (!id) throw new Error('缺少ID')
+  const body = await httpGet(`${QISHUI_H5_API}?track_id=${id}`)
+  const raw = body?.lyric?.content || ''
+  if (!raw) throw new Error('无歌词')
+  return { lyric: krcToLrc(raw) }
+}
+
+function krcToLrc(krc) {
+  const lines = krc.split('\n')
+  const result = []
+  for (const line of lines) {
+    const m = line.match(/^\[(\d+),(\d+)\](.*)$/)
+    if (!m) continue
+    const startMs = parseInt(m[1])
+    const min = Math.floor(startMs / 60000)
+    const sec = Math.floor((startMs % 60000) / 1000)
+    const ms = Math.floor((startMs % 1000) / 10)
+    const text = m[3].replace(/<\d+,\d+,\d+>/g, '')
+    if (text.trim()) result.push(`[${String(min).padStart(2,'0')}:${String(sec).padStart(2,'0')}.${String(ms).padStart(2,'0')}]${text}`)
+  }
+  return result.join('\n')
+}
+
+async function searchQishui(keyword, limit) {
+  const body = await httpGet(`${QISHUI_SEARCH_API}?keyword=${encodeURIComponent(keyword)}&search_type=music&limit=${limit}&real_offset=0&search_source=qishui`)
+  const items = body?.data?.list
+  if (!Array.isArray(items) || !items.length) throw new Error('未找到相关歌曲')
+  return items.slice(0, limit).map(s => ({
+    name: s.title || '', singer: s.author_info?.name || '', albumName: '',
+    id: s.item_id, source: 'qs', interval: formatDuration(s.duration),
+    img: s.cover_url || '',
+    meta: { picture: s.cover_url || '', qs: { id: s.item_id } }
+  }))
+}
+
 // ========== 初始化 ==========
 send(EVENT_NAMES.inited, {
   openDevTools: false,
@@ -378,7 +436,8 @@ send(EVENT_NAMES.inited, {
     kw: { name: '酷我音乐', type: 'music', actions: ['musicUrl', 'search'], qualitys: ['128k', '320k', 'flac'] },
     kg: { name: '酷狗音乐', type: 'music', actions: ['musicUrl'], qualitys: ['128k', '320k', 'flac', 'flac24bit'] },
     mg: { name: '咪咕音乐', type: 'music', actions: ['musicUrl', 'search'], qualitys: ['128k', '320k', 'flac'] },
+    qs: { name: '汽水音乐', type: 'music', actions: ['musicUrl', 'search', 'lyric'], qualitys: ['128k'] },
   }
 })
 
-console.log('[非常刀] v4 已加载 - 网易/QQ/酷我/酷狗/咪咕 多源聚合')
+console.log('[非常刀] v4 已加载 - 网易/QQ/酷我/酷狗/咪咕/汽水 多源聚合')
